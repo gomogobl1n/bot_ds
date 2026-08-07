@@ -24,21 +24,36 @@ async def connect_nodes():
     await bot.wait_until_ready()
 
     # Читаем переменные окружения
-    lavalink_host = os.getenv("LAVALINK_HOST", "http://localhost:2333")
-    lavalink_password = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
+    lavalink_host = os.getenv("LAVALINK_HOST")
+    lavalink_password = os.getenv("LAVALINK_PASSWORD")
+
+    # Если переменные не заданы - используем значения по умолчанию
+    if not lavalink_host:
+        lavalink_host = "http://localhost:2333"
+        print("⚠️ LAVALINK_HOST не задан, использую http://localhost:2333")
+    else:
+        print(f"✅ LAVALINK_HOST: {lavalink_host}")
+
+    if not lavalink_password:
+        lavalink_password = "youshallnotpass"
+        print("⚠️ LAVALINK_PASSWORD не задан, использую стандартный пароль")
 
     # Для Railway используем secure=True если это HTTPS
     is_secure = lavalink_host.startswith("https://")
+    print(f"🔒 Использую secure={is_secure}")
 
-    node = wavelink.Node(
-        identifier="Node1",
-        uri=lavalink_host,
-        password=lavalink_password,
-        secure=is_secure
-    )
+    try:
+        node = wavelink.Node(
+            identifier="Node1",
+            uri=lavalink_host,
+            password=lavalink_password,
+            secure=is_secure
+        )
 
-    await wavelink.Pool.connect(client=bot, nodes=[node])
-    print(f"✅ Lavalink подключён к {lavalink_host}!")
+        await wavelink.Pool.connect(client=bot, nodes=[node])
+        print(f"✅ Lavalink подключён к {lavalink_host}!")
+    except Exception as e:
+        print(f"❌ Ошибка подключения к Lavalink: {e}")
 
 
 # Событие при запуске
@@ -52,6 +67,12 @@ async def on_ready():
 @bot.event
 async def on_wavelink_node_ready(payload: wavelink.NodeReadyEventPayload):
     print(f"✅ Узел {payload.node.identifier} готов!")
+
+
+# Событие при ошибке Lavalink
+@bot.event
+async def on_wavelink_node_disconnect(payload: wavelink.NodeDisconnectEventPayload):
+    print(f"❌ Узел {payload.node.identifier} отключился!")
 
 
 # Функция для получения очереди по голосовому каналу
