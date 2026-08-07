@@ -38,16 +38,20 @@ async def connect_nodes():
         lavalink_password = "youshallnotpass"
         print("⚠️ LAVALINK_PASSWORD не задан, использую стандартный пароль")
 
-    # Для Railway используем secure=True если это HTTPS
-    is_secure = lavalink_host.startswith("https://")
-    print(f"🔒 Использую secure={is_secure}")
+    # Для Railway используем wss:// если это HTTPS
+    if lavalink_host.startswith("https://"):
+        # Заменяем https:// на wss:// для WebSocket соединения
+        uri = lavalink_host.replace("https://", "wss://")
+        print(f"🔒 Использую WebSocket Secure: {uri}")
+    else:
+        uri = lavalink_host.replace("http://", "ws://")
+        print(f"🔓 Использую WebSocket: {uri}")
 
     try:
         node = wavelink.Node(
             identifier="Node1",
-            uri=lavalink_host,
-            password=lavalink_password,
-            secure=is_secure
+            uri=uri,
+            password=lavalink_password
         )
 
         await wavelink.Pool.connect(client=bot, nodes=[node])
@@ -69,7 +73,7 @@ async def on_wavelink_node_ready(payload: wavelink.NodeReadyEventPayload):
     print(f"✅ Узел {payload.node.identifier} готов!")
 
 
-# Событие при отключении Lavalink (исправлено название)
+# Событие при отключении Lavalink
 @bot.event
 async def on_wavelink_node_disconnected(payload: wavelink.NodeDisconnectedEventPayload):
     print(f"❌ Узел {payload.node.identifier} отключился!")
