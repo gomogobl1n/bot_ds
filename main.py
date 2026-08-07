@@ -1,4 +1,5 @@
 ﻿import discord
+import os
 import wavelink
 from collections import deque
 import re
@@ -19,10 +20,14 @@ player_messages = {}
 async def connect_nodes():
     await bot.wait_until_ready()
 
+    lavalink_host = os.getenv("LAVALINK_HOST", "http://localhost:2333")
+    lavalink_password = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
+
     node = wavelink.Node(
         identifier="Node1",
-        uri="http://localhost:2333",
-        password="youshallnotpass"
+        uri=lavalink_host,
+        password=lavalink_password,
+        secure=True  # Добавьте эту строку для HTTPS
     )
 
     await wavelink.Pool.connect(client=bot, nodes=[node])
@@ -434,13 +439,11 @@ async def leave(ctx: discord.ApplicationContext):
     await ctx.respond("👋 Бот отключён! Очередь очищена!")
 
 
-# ========== ЗАПУСК ==========
+# ========== HTTP-СЕРВЕР ДЛЯ РАILWAY ==========
 
-bot.run("-")
-
-# === HTTP-сервер для Render ===
 async def health_check(request):
     return web.Response(text="OK")
+
 
 async def run_web_server():
     app = web.Application()
@@ -449,13 +452,23 @@ async def run_web_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', 8080)
     await site.start()
-    print("✅ Web server started for Render health checks")
+    print("✅ Web server started on port 8080")
+
 
 async def main():
     # Запускаем веб-сервер в фоне
     asyncio.create_task(run_web_server())
+
     # Запускаем бота
-    await bot.start("ВАШ_ТОКЕН")  # Используйте await bot.start(), а не bot.run()
+    token = os.getenv("DISCORD_TOKEN")
+    if not token:
+        print("❌ Ошибка: DISCORD_TOKEN не найден в переменных окружения!")
+        return
+
+    await bot.start(token)
+
+
+# ========== ЗАПУСК ==========
 
 if __name__ == "__main__":
     asyncio.run(main())
