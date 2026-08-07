@@ -10,7 +10,7 @@ from aiohttp import web
 # Создаём бота с префиксными командами
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix="/", intents=intents)
+bot = commands.Bot(command_prefix=">", intents=intents)
 
 # Словарь для хранения очередей для каждого голосового канала
 queues = {}
@@ -69,9 +69,9 @@ async def on_wavelink_node_ready(payload: wavelink.NodeReadyEventPayload):
     print(f"✅ Узел {payload.node.identifier} готов!")
 
 
-# Событие при ошибке Lavalink
+# Событие при ошибке Lavalink (исправлено название)
 @bot.event
-async def on_wavelink_node_disconnect(payload: wavelink.NodeDisconnectEventPayload):
+async def on_wavelink_node_disconnected(payload: wavelink.NodeDisconnectedEventPayload):
     print(f"❌ Узел {payload.node.identifier} отключился!")
 
 
