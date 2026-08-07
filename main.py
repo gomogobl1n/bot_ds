@@ -10,7 +10,7 @@ from aiohttp import web
 # Создаём бота с префиксными командами
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix=">", intents=intents)
+bot = commands.Bot(command_prefix="/", intents=intents)
 
 # Словарь для хранения очередей для каждого голосового канала
 queues = {}
