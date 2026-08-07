@@ -40,7 +40,6 @@ async def connect_nodes():
 
     # Для Railway используем wss:// если это HTTPS
     if lavalink_host.startswith("https://"):
-        # Заменяем https:// на wss:// для WebSocket соединения
         uri = lavalink_host.replace("https://", "wss://")
         print(f"🔒 Использую WebSocket Secure: {uri}")
     else:
@@ -291,42 +290,46 @@ async def on_wavelink_track_end(payload: wavelink.TrackEndEventPayload):
 # >play
 @bot.command(name="play", description="Воспроизвести музыку или добавить в очередь")
 async def play(ctx: commands.Context, *, search: str):
-    if not ctx.author.voice:
-        return await ctx.send("❌ Вы не в голосовом канале!")
+    # Отправляем "печатает..." чтобы Discord знал, что бот работает
+    async with ctx.typing():
+        if not ctx.author.voice:
+            return await ctx.send("❌ Вы не в голосовом канале!")
 
-    channel = ctx.author.voice.channel
-    vc: wavelink.Player = ctx.voice_client
+        channel = ctx.author.voice.channel
+        vc: wavelink.Player = ctx.voice_client
 
-    if not vc:
-        vc = await channel.connect(cls=wavelink.Player)
-    elif vc.channel.id != channel.id:
-        await vc.move_to(channel)
+        if not vc:
+            vc = await channel.connect(cls=wavelink.Player)
+        elif vc.channel.id != channel.id:
+            await vc.move_to(channel)
 
-    await ctx.send(f"🔍 Ищу: `{search}`...")
+        # Отправляем начальное сообщение
+        msg = await ctx.send(f"🔍 Ищу: `{search}`...")
 
-    tracks = await search_tracks(search)
+        tracks = await search_tracks(search)
 
-    if tracks is None:
-        return await ctx.send("❌ Ошибка при поиске! Попробуйте использовать ссылку или другой запрос.")
+        if tracks is None:
+            return await msg.edit(content="❌ Ошибка при поиске! Попробуйте использовать ссылку или другой запрос.")
 
-    if not tracks:
-        return await ctx.send("❌ Ничего не найдено! Попробуйте другой запрос или используйте ссылку на YouTube.")
+        if not tracks:
+            return await msg.edit(
+                content="❌ Ничего не найдено! Попробуйте другой запрос или используйте ссылку на YouTube.")
 
-    track = tracks[0]
-    queue = get_queue(ctx.guild.id)
+        track = tracks[0]
+        queue = get_queue(ctx.guild.id)
 
-    if vc.current:
-        queue.append(track)
-        position = len(queue)
-        await ctx.send(f"✅ Добавлено в очередь (позиция {position}): `{track.title}`")
-    else:
-        try:
-            await vc.play(track)
-            await ctx.send(f"▶️ Сейчас играет: `{track.title}`")
-            await update_player_message(ctx, vc, queue)
-        except Exception as e:
-            print(f"Ошибка воспроизведения: {e}")
-            await ctx.send(f"❌ Ошибка воспроизведения: {e}")
+        if vc.current:
+            queue.append(track)
+            position = len(queue)
+            await msg.edit(content=f"✅ Добавлено в очередь (позиция {position}): `{track.title}`")
+        else:
+            try:
+                await vc.play(track)
+                await msg.edit(content=f"▶️ Сейчас играет: `{track.title}`")
+                await update_player_message(ctx, vc, queue)
+            except Exception as e:
+                print(f"Ошибка воспроизведения: {e}")
+                await msg.edit(content=f"❌ Ошибка воспроизведения: {e}")
 
 
 # >queue
