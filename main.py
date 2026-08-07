@@ -1,4 +1,5 @@
 ﻿import discord
+from discord.ext import commands
 import wavelink
 from collections import deque
 import re
@@ -7,7 +8,9 @@ import asyncio
 from aiohttp import web
 
 # Создаём бота
-bot = discord.Bot()
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix=">", intents=intents)
 
 # Словарь для хранения очередей для каждого голосового канала
 queues = {}
