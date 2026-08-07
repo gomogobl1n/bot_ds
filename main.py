@@ -2,6 +2,9 @@
 import wavelink
 from collections import deque
 import re
+import os
+import asyncio
+from aiohttp import web
 
 # Создаём бота
 bot = discord.Bot()
@@ -13,18 +16,26 @@ queues = {}
 player_messages = {}
 
 
-# Подключение к Lavalink
+# Подключение к Lavalink (с переменными окружения)
 async def connect_nodes():
     await bot.wait_until_ready()
 
+    # Читаем переменные окружения
+    lavalink_host = os.getenv("LAVALINK_HOST", "http://localhost:2333")
+    lavalink_password = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
+
+    # Для Railway используем secure=True если это HTTPS
+    is_secure = lavalink_host.startswith("https://")
+
     node = wavelink.Node(
         identifier="Node1",
-        uri="http://localhost:2333",
-        password="youshallnotpass"
+        uri=lavalink_host,
+        password=lavalink_password,
+        secure=is_secure
     )
 
     await wavelink.Pool.connect(client=bot, nodes=[node])
-    print("✅ Lavalink подключён!")
+    print(f"✅ Lavalink подключён к {lavalink_host}!")
 
 
 # Событие при запуске
@@ -148,7 +159,7 @@ async def update_player_message(ctx, vc: wavelink.Player, queue, interaction=Non
     player_messages[guild_id][channel_id] = msg
 
 
-# Класс для обработки кнопок (исправлен)
+# Класс для обработки кнопок
 class PlayerView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -158,12 +169,11 @@ class PlayerView(discord.ui.View):
         await interaction.response.defer()
         vc: wavelink.Player = interaction.guild.voice_client
         if vc and vc.current:
-            # В Wavelink 3.x pause() требует аргумент
             if vc.paused:
-                await vc.pause(False)  # Снимаем паузу (resume)
+                await vc.pause(False)
                 button.label = "⏸️"
             else:
-                await vc.pause(True)  # Ставим паузу
+                await vc.pause(True)
                 button.label = "▶️"
             queue = get_queue(interaction.guild.id)
             await update_player_message(interaction, vc, queue, interaction)
@@ -392,7 +402,7 @@ async def pause(ctx: discord.ApplicationContext):
     if vc.paused:
         return await ctx.respond("⏸️ Уже на паузе!", ephemeral=True)
 
-    await vc.pause(True)  # Ставим паузу
+    await vc.pause(True)
     await ctx.respond("⏸️ На паузе!")
 
     queue = get_queue(ctx.guild_id)
@@ -410,7 +420,7 @@ async def resume(ctx: discord.ApplicationContext):
     if not vc.paused:
         return await ctx.respond("▶️ Уже играет!", ephemeral=True)
 
-    await vc.pause(False)  # Снимаем паузу
+    await vc.pause(False)
     await ctx.respond("▶️ Продолжаю!")
 
     queue = get_queue(ctx.guild_id)
@@ -432,6 +442,36 @@ async def leave(ctx: discord.ApplicationContext):
     await ctx.respond("👋 Бот отключён! Очередь очищена!")
 
 
+# ========== HTTP-сервер для Railway ==========
+
+async def health_check(request):
+    return web.Response(text="OK")
+
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    await site.start()
+    print("✅ Web server started on port 8080")
+
+
+async def main():
+    # Запускаем веб-сервер в фоне
+    asyncio.create_task(run_web_server())
+
+    # Запускаем бота
+    token = os.getenv("DISCORD_TOKEN")
+    if not token:
+        print("❌ Ошибка: DISCORD_TOKEN не найден в переменных окружения!")
+        return
+
+    await bot.start(token)
+
+
 # ========== ЗАПУСК ==========
 
-bot.run("MTUzNTEzNDg2NTI2NjMxNTQwNA.Gt9hf0.5TX0qRG0skNVY9uZHcLPgzvfTHM2N9_MKpVbK8")
+if __name__ == "__main__":
+    asyncio.run(main())
