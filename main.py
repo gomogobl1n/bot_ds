@@ -7,10 +7,8 @@ import os
 import asyncio
 from aiohttp import web
 
-# Создаём бота с префиксными командами
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="/", intents=intents)
+# Создаём бота
+bot = discord.Bot()
 
 # Словарь для хранения очередей для каждого голосового канала
 queues = {}
@@ -263,11 +261,14 @@ async def on_wavelink_track_end(payload: wavelink.TrackEndEventPayload):
 
 # ========== КОМАНДЫ ==========
 
-# >play
-@bot.command(name="play", description="Воспроизвести музыку или добавить в очередь")
-async def play(ctx: commands.Context, *, search: str):
+# /play
+@bot.slash_command(name="play", description="Воспроизвести музыку или добавить в очередь")
+async def play(
+        ctx: discord.ApplicationContext,
+        search: discord.Option(str, description="Название трека или ссылка")
+):
     if not ctx.author.voice:
-        return await ctx.send("❌ Вы не в голосовом канале!")
+        return await ctx.respond("❌ Вы не в голосовом канале!", ephemeral=True)
 
     channel = ctx.author.voice.channel
     vc: wavelink.Player = ctx.voice_client
@@ -277,168 +278,169 @@ async def play(ctx: commands.Context, *, search: str):
     elif vc.channel.id != channel.id:
         await vc.move_to(channel)
 
-    await ctx.send(f"🔍 Ищу: `{search}`...")
+    await ctx.respond(f"🔍 Ищу: `{search}`...")
 
     tracks = await search_tracks(search)
 
     if tracks is None:
-        return await ctx.send("❌ Ошибка при поиске! Попробуйте использовать ссылку или другой запрос.")
+        return await ctx.edit(content="❌ Ошибка при поиске! Попробуйте использовать ссылку или другой запрос.")
 
     if not tracks:
-        return await ctx.send("❌ Ничего не найдено! Попробуйте другой запрос или используйте ссылку на YouTube.")
+        return await ctx.edit(
+            content="❌ Ничего не найдено! Попробуйте другой запрос или используйте ссылку на YouTube.")
 
     track = tracks[0]
-    queue = get_queue(ctx.guild.id)
+    queue = get_queue(ctx.guild_id)
 
     if vc.current:
         queue.append(track)
         position = len(queue)
-        await ctx.send(f"✅ Добавлено в очередь (позиция {position}): `{track.title}`")
+        await ctx.edit(content=f"✅ Добавлено в очередь (позиция {position}): `{track.title}`")
     else:
         try:
             await vc.play(track)
-            await ctx.send(f"▶️ Сейчас играет: `{track.title}`")
+            await ctx.edit(content=f"▶️ Сейчас играет: `{track.title}`")
             await update_player_message(ctx, vc, queue)
         except Exception as e:
             print(f"Ошибка воспроизведения: {e}")
-            await ctx.send(f"❌ Ошибка воспроизведения: {e}")
+            await ctx.edit(content=f"❌ Ошибка воспроизведения: {e}")
 
 
-# >queue
-@bot.command(name="queue", description="Показать текущую очередь")
-async def queue_command(ctx: commands.Context):
+# /queue
+@bot.slash_command(name="queue", description="Показать текущую очередь")
+async def queue_command(ctx: discord.ApplicationContext):
     vc: wavelink.Player = ctx.voice_client
 
     if not vc:
-        return await ctx.send("❌ Бот не в голосовом канале!")
+        return await ctx.respond("❌ Бот не в голосовом канале!", ephemeral=True)
 
-    queue = get_queue(ctx.guild.id)
+    queue = get_queue(ctx.guild_id)
     embed = create_player_embed(vc, queue)
-    await ctx.send(embed=embed, view=PlayerView())
+    await ctx.respond(embed=embed, view=PlayerView())
 
 
-# >now
-@bot.command(name="now", description="Показать что играет сейчас")
-async def now(ctx: commands.Context):
+# /now
+@bot.slash_command(name="now", description="Показать что играет сейчас")
+async def now(ctx: discord.ApplicationContext):
     vc: wavelink.Player = ctx.voice_client
 
     if not vc or not vc.current:
-        return await ctx.send("❌ Сейчас ничего не играет!")
+        return await ctx.respond("❌ Сейчас ничего не играет!", ephemeral=True)
 
-    queue = get_queue(ctx.guild.id)
+    queue = get_queue(ctx.guild_id)
     embed = create_player_embed(vc, queue)
-    await ctx.send(embed=embed, view=PlayerView())
+    await ctx.respond(embed=embed, view=PlayerView())
 
 
-# >skip
-@bot.command(name="skip", description="Пропустить текущий трек")
-async def skip(ctx: commands.Context):
+# /skip
+@bot.slash_command(name="skip", description="Пропустить текущий трек")
+async def skip(ctx: discord.ApplicationContext):
     vc: wavelink.Player = ctx.voice_client
 
     if not vc or not vc.current:
-        return await ctx.send("❌ Сейчас ничего не играет!")
+        return await ctx.respond("❌ Сейчас ничего не играет!", ephemeral=True)
 
-    queue = get_queue(ctx.guild.id)
+    queue = get_queue(ctx.guild_id)
 
     if queue:
         await vc.stop()
-        await ctx.send("⏭️ Трек пропущен! Следующий в очереди...")
+        await ctx.respond("⏭️ Трек пропущен! Следующий в очереди...")
     else:
         await vc.stop()
-        await ctx.send("⏭️ Трек пропущен! Очередь пуста.")
+        await ctx.respond("⏭️ Трек пропущен! Очередь пуста.")
 
     await update_player_message(ctx, vc, queue)
 
 
-# >stop
-@bot.command(name="stop", description="Остановить музыку и очистить очередь")
-async def stop(ctx: commands.Context):
+# /stop
+@bot.slash_command(name="stop", description="Остановить музыку и очистить очередь")
+async def stop(ctx: discord.ApplicationContext):
     vc: wavelink.Player = ctx.voice_client
 
     if not vc:
-        return await ctx.send("❌ Бот не в голосовом канале!")
+        return await ctx.respond("❌ Бот не в голосовом канале!", ephemeral=True)
 
     if not vc.current:
-        return await ctx.send("❌ Сейчас ничего не играет!")
+        return await ctx.respond("❌ Сейчас ничего не играет!", ephemeral=True)
 
-    queue = get_queue(ctx.guild.id)
+    queue = get_queue(ctx.guild_id)
     queue.clear()
 
     await vc.stop()
-    await ctx.send("⏹️ Музыка остановлена! Очередь очищена!")
+    await ctx.respond("⏹️ Музыка остановлена! Очередь очищена!")
 
     await update_player_message(ctx, vc, queue)
 
 
-# >clear
-@bot.command(name="clear", description="Очистить очередь без остановки текущей песни")
-async def clear(ctx: commands.Context):
+# /clear
+@bot.slash_command(name="clear", description="Очистить очередь без остановки текущей песни")
+async def clear(ctx: discord.ApplicationContext):
     vc: wavelink.Player = ctx.voice_client
 
     if not vc:
-        return await ctx.send("❌ Бот не в голосовом канале!")
+        return await ctx.respond("❌ Бот не в голосовом канале!", ephemeral=True)
 
-    queue = get_queue(ctx.guild.id)
+    queue = get_queue(ctx.guild_id)
     count = len(queue)
 
     if count == 0:
-        return await ctx.send("📭 Очередь уже пуста!")
+        return await ctx.respond("📭 Очередь уже пуста!", ephemeral=True)
 
     queue.clear()
-    await ctx.send(f"🗑️ Очищено {count} треков из очереди!")
+    await ctx.respond(f"🗑️ Очищено {count} треков из очереди!")
 
     await update_player_message(ctx, vc, queue)
 
 
-# >pause
-@bot.command(name="pause", description="Поставить на паузу")
-async def pause(ctx: commands.Context):
+# /pause
+@bot.slash_command(name="pause", description="Поставить на паузу")
+async def pause(ctx: discord.ApplicationContext):
     vc: wavelink.Player = ctx.voice_client
 
     if not vc or not vc.current:
-        return await ctx.send("❌ Сейчас ничего не играет!")
+        return await ctx.respond("❌ Сейчас ничего не играет!", ephemeral=True)
 
     if vc.paused:
-        return await ctx.send("⏸️ Уже на паузе!")
+        return await ctx.respond("⏸️ Уже на паузе!", ephemeral=True)
 
     await vc.pause(True)
-    await ctx.send("⏸️ На паузе!")
+    await ctx.respond("⏸️ На паузе!")
 
-    queue = get_queue(ctx.guild.id)
+    queue = get_queue(ctx.guild_id)
     await update_player_message(ctx, vc, queue)
 
 
-# >resume
-@bot.command(name="resume", description="Продолжить воспроизведение")
-async def resume(ctx: commands.Context):
+# /resume
+@bot.slash_command(name="resume", description="Продолжить воспроизведение")
+async def resume(ctx: discord.ApplicationContext):
     vc: wavelink.Player = ctx.voice_client
 
     if not vc or not vc.current:
-        return await ctx.send("❌ Сейчас ничего не играет!")
+        return await ctx.respond("❌ Сейчас ничего не играет!", ephemeral=True)
 
     if not vc.paused:
-        return await ctx.send("▶️ Уже играет!")
+        return await ctx.respond("▶️ Уже играет!", ephemeral=True)
 
     await vc.pause(False)
-    await ctx.send("▶️ Продолжаю!")
+    await ctx.respond("▶️ Продолжаю!")
 
-    queue = get_queue(ctx.guild.id)
+    queue = get_queue(ctx.guild_id)
     await update_player_message(ctx, vc, queue)
 
 
-# >leave
-@bot.command(name="leave", description="Отключить бота и очистить очередь")
-async def leave(ctx: commands.Context):
+# /leave
+@bot.slash_command(name="leave", description="Отключить бота и очистить очередь")
+async def leave(ctx: discord.ApplicationContext):
     vc: wavelink.Player = ctx.voice_client
 
     if not vc:
-        return await ctx.send("❌ Бот не в голосовом канале!")
+        return await ctx.respond("❌ Бот не в голосовом канале!", ephemeral=True)
 
-    queue = get_queue(ctx.guild.id)
+    queue = get_queue(ctx.guild_id)
     queue.clear()
 
     await vc.disconnect()
-    await ctx.send("👋 Бот отключён! Очередь очищена!")
+    await ctx.respond("👋 Бот отключён! Очередь очищена!")
 
 
 # ========== HTTP-сервер для Railway ==========
