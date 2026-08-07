@@ -69,7 +69,7 @@ async def on_wavelink_node_ready(payload: wavelink.NodeReadyEventPayload):
     print(f"✅ Узел {payload.node.identifier} готов!")
 
 
-# Событие при ошибке Lavalink (исправлено название)
+# Событие при отключении Lavalink (исправлено название)
 @bot.event
 async def on_wavelink_node_disconnected(payload: wavelink.NodeDisconnectedEventPayload):
     print(f"❌ Узел {payload.node.identifier} отключился!")
