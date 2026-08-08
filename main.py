@@ -27,7 +27,7 @@ player_messages = {}
 lavalink_ready = False
 
 
-# Альтернативное подключение к Lavalink
+# Подключение к Lavalink
 async def connect_nodes():
     global lavalink_ready
     await bot.wait_until_ready()
@@ -45,65 +45,56 @@ async def connect_nodes():
         lavalink_password = "youshallnotpass"
         logger.warning("LAVALINK_PASSWORD не задан, использую стандартный пароль")
 
-    # Извлекаем хост
+    # Правильно формируем WebSocket URL
+    # Убираем протокол и лишние пути
+    clean_host = lavalink_host.replace("http://", "").replace("https://", "").split("/")[0]
+
+    # Если хост уже содержит порт, используем его, иначе добавляем :2333
+    if ":" not in clean_host:
+        clean_host = f"{clean_host}:2333"
+
+    # Пробуем подключиться через WebSocket
+    ws_uri = f"ws://{clean_host}/v4/websocket"
+
+    # Если оригинальный URL был HTTPS, пробуем WSS
     if lavalink_host.startswith("https://"):
-        host = lavalink_host.replace("https://", "").split("/")[0]
-    elif lavalink_host.startswith("http://"):
-        host = lavalink_host.replace("http://", "").split("/")[0]
-    else:
-        host = lavalink_host.split("/")[0]
+        ws_uri = f"wss://{clean_host}/v4/websocket"
 
-    # Пробуем разные варианты подключения
-    uris_to_try = [
-        f"ws://{host}:2333/v4/websocket",
-        f"wss://{host}:2333/v4/websocket",
-        f"ws://{host}/v4/websocket",
-        f"wss://{host}/v4/websocket",
-    ]
-
-    # Если хост уже содержит порт, используем его
-    if ":" in host:
-        uris_to_try = [
-            f"ws://{host}/v4/websocket",
-            f"wss://{host}/v4/websocket",
-        ]
+    logger.info(f"Подключение к Lavalink через: {ws_uri}")
 
     max_retries = 5
     for attempt in range(max_retries):
-        for uri in uris_to_try:
-            try:
-                logger.info(f"Попытка подключения к Lavalink #{attempt + 1} через {uri}")
+        try:
+            logger.info(f"Попытка подключения к Lavalink #{attempt + 1}")
 
-                node = wavelink.Node(
-                    identifier="Node1",
-                    uri=uri,
-                    password=lavalink_password
-                )
+            node = wavelink.Node(
+                identifier="Node1",
+                uri=ws_uri,
+                password=lavalink_password
+            )
 
-                await wavelink.Pool.connect(client=bot, nodes=[node])
+            await wavelink.Pool.connect(client=bot, nodes=[node])
 
-                # Ждем и проверяем подключение
-                await asyncio.sleep(2)
+            # Ждем подключения
+            await asyncio.sleep(3)
 
-                # Проверяем, подключились ли
-                if node.is_connected:
-                    lavalink_ready = True
-                    logger.info(f"✅ Lavalink успешно подключён через {uri}!")
-                    return
-                else:
-                    logger.warning(f"Узел не подключился через {uri}")
+            # Проверяем статус
+            if wavelink.Pool.get_node():
+                lavalink_ready = True
+                logger.info(f"✅ Lavalink успешно подключён!")
+                return
+            else:
+                logger.warning(f"Узел не подключился, попытка {attempt + 1}")
 
-            except Exception as e:
-                logger.error(f"Ошибка через {uri}: {e}")
-                continue
-
-        if attempt < max_retries - 1:
-            wait_time = 5 * (attempt + 1)
-            logger.info(f"Повторная попытка через {wait_time} секунд...")
-            await asyncio.sleep(wait_time)
-        else:
-            logger.error("❌ Не удалось подключиться к Lavalink после всех попыток!")
-            lavalink_ready = False
+        except Exception as e:
+            logger.error(f"Ошибка подключения к Lavalink (попытка {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                wait_time = 5 * (attempt + 1)
+                logger.info(f"Повторная попытка через {wait_time} секунд...")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error("❌ Не удалось подключиться к Lavalink после всех попыток!")
+                lavalink_ready = False
 
 
 # Проверка подключения к Lavalink перед выполнением команд
@@ -360,9 +351,6 @@ async def on_wavelink_track_end(payload: wavelink.TrackEndEventPayload):
 
 
 # ========== СЛЭШ-КОМАНДЫ ==========
-
-# (Все команды остаются такими же, как в предыдущей версии)
-# play, queue, now, skip, stop, clear, pause, resume, leave
 
 @bot.tree.command(name="play", description="Воспроизвести музыку или добавить в очередь")
 async def play(interaction: discord.Interaction, search: str):
