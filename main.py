@@ -159,32 +159,39 @@ def create_player_embed(vc: wavelink.Player, queue):
 
 # Функция для обновления сообщения плеера
 async def update_player_message(ctx, vc: wavelink.Player, queue, interaction=None):
-    embed = create_player_embed(vc, queue)
+    try:
+        embed = create_player_embed(vc, queue)
 
-    guild_id = ctx.guild.id
-    channel_id = ctx.channel.id
+        guild_id = ctx.guild.id if hasattr(ctx, 'guild') else ctx.interaction.guild.id
+        channel_id = ctx.channel.id if hasattr(ctx, 'channel') else ctx.interaction.channel.id
 
-    if guild_id not in player_messages:
-        player_messages[guild_id] = {}
+        if guild_id not in player_messages:
+            player_messages[guild_id] = {}
 
-    if interaction:
-        try:
-            await interaction.edit_original_response(embed=embed, view=PlayerView())
-            return
-        except:
-            pass
+        if interaction:
+            try:
+                await interaction.edit_original_response(embed=embed, view=PlayerView())
+                return
+            except:
+                pass
 
-    if channel_id in player_messages[guild_id]:
-        try:
-            msg = player_messages[guild_id][channel_id]
-            await msg.edit(embed=embed, view=PlayerView())
-            return
-        except:
-            pass
+        if channel_id in player_messages[guild_id]:
+            try:
+                msg = player_messages[guild_id][channel_id]
+                await msg.edit(embed=embed, view=PlayerView())
+                return
+            except discord.NotFound:
+                # Сообщение было удалено, создаем новое
+                pass
+            except Exception as e:
+                print(f"Ошибка обновления сообщения: {e}")
 
-    msg = await ctx.send(embed=embed, view=PlayerView())
-    player_messages[guild_id][channel_id] = msg
-
+        # Создаем новое сообщение только если контекст это позволяет
+        if hasattr(ctx, 'send'):
+            msg = await ctx.send(embed=embed, view=PlayerView())
+            player_messages[guild_id][channel_id] = msg
+    except Exception as e:
+        print(f"Критическая ошибка в update_player_message: {e}")
 
 # Класс для обработки кнопок
 class PlayerView(discord.ui.View):
@@ -252,11 +259,19 @@ class PlayerView(discord.ui.View):
 async def on_wavelink_track_end(payload: wavelink.TrackEndEventPayload):
     vc: wavelink.Player = payload.player
 
-    if not vc:
+    if not vc or not vc.guild:
+        return
+
+    # Проверяем, что бот все еще в голосовом канале
+    if not vc.channel:
         return
 
     guild_id = vc.guild.id
     queue = get_queue(guild_id)
+
+    # Проверяем, что это не ошибка или остановка
+    if payload.reason == wavelink.TrackEndReason.STOPPED:
+        return
 
     if queue:
         next_track = queue.popleft()
@@ -265,24 +280,24 @@ async def on_wavelink_track_end(payload: wavelink.TrackEndEventPayload):
             print(f"▶️ Автоматически играет следующий трек: {next_track.title}")
         except Exception as e:
             print(f"Ошибка при воспроизведении следующего трека: {e}")
+            return
 
-        if guild_id in player_messages:
-            for channel_id, msg in player_messages[guild_id].items():
-                try:
-                    embed = create_player_embed(vc, queue)
-                    await msg.edit(embed=embed, view=PlayerView())
-                except:
-                    pass
-    else:
-        print("⏹️ Очередь пуста")
-
-        if guild_id in player_messages:
-            for channel_id, msg in player_messages[guild_id].items():
-                try:
-                    embed = create_player_embed(vc, queue)
-                    await msg.edit(embed=embed, view=PlayerView())
-                except:
-                    pass
+        # Обновляем сообщение только если есть voice client
+        if vc and vc.channel:
+            try:
+                if guild_id in player_messages:
+                    for channel_id, msg in list(player_messages[guild_id].items()):
+                        try:
+                            embed = create_player_embed(vc, queue)
+                            await msg.edit(embed=embed, view=PlayerView())
+                        except discord.NotFound:
+                            # Удаляем несуществующее сообщение из словаря
+                            if guild_id in player_messages and channel_id in player_messages[guild_id]:
+                                del player_messages[guild_id][channel_id]
+                        except Exception as e:
+                            print(f"Ошибка обновления сообщения: {e}")
+            except Exception as e:
+                print(f"Ошибка в on_wavelink_track_end: {e}")
 
 
 # ========== КОМАНДЫ ==========
