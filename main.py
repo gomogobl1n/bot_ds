@@ -46,25 +46,17 @@ async def connect_nodes():
         logger.warning("LAVALINK_PASSWORD не задан, использую стандартный пароль")
 
     # Извлекаем хост и порт из URL
-    # Убираем протокол и лишние пути
     if lavalink_host.startswith("https://"):
         host = lavalink_host.replace("https://", "").split("/")[0]
-        # Пробуем подключиться через HTTP сначала, потом через WebSocket
-        http_uri = f"http://{host}"
         ws_uri = f"wss://{host}/v4/websocket"
-        logger.info(f"Использую HTTP: {http_uri}")
         logger.info(f"Использую WebSocket: {ws_uri}")
     elif lavalink_host.startswith("http://"):
         host = lavalink_host.replace("http://", "").split("/")[0]
-        http_uri = f"http://{host}"
         ws_uri = f"ws://{host}/v4/websocket"
-        logger.info(f"Использую HTTP: {http_uri}")
         logger.info(f"Использую WebSocket: {ws_uri}")
     else:
         host = lavalink_host.split("/")[0]
-        http_uri = f"http://{host}"
         ws_uri = f"ws://{host}/v4/websocket"
-        logger.info(f"Использую HTTP: {http_uri}")
         logger.info(f"Использую WebSocket: {ws_uri}")
 
     # Пробуем подключиться несколько раз
@@ -73,22 +65,21 @@ async def connect_nodes():
         try:
             logger.info(f"Попытка подключения к Lavalink #{attempt + 1}")
 
-            # Создаем узел с правильным URI
+            # Создаем узел без дополнительных параметров
             node = wavelink.Node(
                 identifier="Node1",
                 uri=ws_uri,
-                password=lavalink_password,
-                reconnect_attempts=10,
-                reconnect_interval=5
+                password=lavalink_password
             )
 
             # Подключаемся
             await wavelink.Pool.connect(client=bot, nodes=[node])
 
             # Ждем, пока узел будет готов
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
 
-            if node.is_connected:
+            # Проверяем, есть ли узлы в пуле
+            if wavelink.Pool.get_node():
                 lavalink_ready = True
                 logger.info(f"✅ Lavalink успешно подключён к {lavalink_host}!")
                 return
