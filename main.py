@@ -45,20 +45,14 @@ async def connect_nodes():
         lavalink_password = "youshallnotpass"
         logger.warning("LAVALINK_PASSWORD не задан, использую стандартный пароль")
 
-    # Правильно формируем WebSocket URL
-    # Убираем протокол и лишние пути
-    clean_host = lavalink_host.replace("http://", "").replace("https://", "").split("/")[0]
+    # Убираем протокол и всё после домена
+    clean_host = lavalink_host.replace("https://", "").replace("http://", "").split("/")[0]
 
-    # Если хост уже содержит порт, используем его, иначе добавляем :2333
-    if ":" not in clean_host:
-        clean_host = f"{clean_host}:2333"
-
-    # Пробуем подключиться через WebSocket
-    ws_uri = f"ws://{clean_host}/v4/websocket"
-
-    # Если оригинальный URL был HTTPS, пробуем WSS
+    # Определяем протокол
     if lavalink_host.startswith("https://"):
-        ws_uri = f"wss://{clean_host}/v4/websocket"
+        ws_uri = f"wss://{clean_host}:2333"
+    else:
+        ws_uri = f"ws://{clean_host}:2333"
 
     logger.info(f"Подключение к Lavalink через: {ws_uri}")
 
@@ -69,16 +63,14 @@ async def connect_nodes():
 
             node = wavelink.Node(
                 identifier="Node1",
-                uri=ws_uri,
+                uri=ws_uri,  # Теперь без /v4/websocket
                 password=lavalink_password
             )
 
             await wavelink.Pool.connect(client=bot, nodes=[node])
 
-            # Ждем подключения
             await asyncio.sleep(3)
 
-            # Проверяем статус
             if wavelink.Pool.get_node():
                 lavalink_ready = True
                 logger.info(f"✅ Lavalink успешно подключён!")
@@ -95,7 +87,6 @@ async def connect_nodes():
             else:
                 logger.error("❌ Не удалось подключиться к Lavalink после всех попыток!")
                 lavalink_ready = False
-
 
 # Проверка подключения к Lavalink перед выполнением команд
 async def check_lavalink(interaction):
