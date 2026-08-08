@@ -23,9 +23,13 @@ queues = {}
 # Словарь для хранения сообщений плеера
 player_messages = {}
 
+# Флаг подключения к Lavalink
+lavalink_ready = False
 
-# Подключение к Lavalink
+
+# Подключение к Lavalink с повторными попытками
 async def connect_nodes():
+    global lavalink_ready
     await bot.wait_until_ready()
 
     lavalink_host = os.getenv("LAVALINK_HOST")
@@ -41,41 +45,85 @@ async def connect_nodes():
         lavalink_password = "youshallnotpass"
         logger.warning("LAVALINK_PASSWORD не задан, использую стандартный пароль")
 
-    # Правильная обработка URL для WebSocket
-    # Убираем протокол и путь
+    # Извлекаем хост и порт из URL
+    # Убираем протокол и лишние пути
     if lavalink_host.startswith("https://"):
-        host = lavalink_host.replace("https://", "")
-        uri = f"wss://{host}/v4/websocket"
-        logger.info(f"Использую WebSocket Secure: {uri}")
+        host = lavalink_host.replace("https://", "").split("/")[0]
+        # Пробуем подключиться через HTTP сначала, потом через WebSocket
+        http_uri = f"http://{host}"
+        ws_uri = f"wss://{host}/v4/websocket"
+        logger.info(f"Использую HTTP: {http_uri}")
+        logger.info(f"Использую WebSocket: {ws_uri}")
     elif lavalink_host.startswith("http://"):
-        host = lavalink_host.replace("http://", "")
-        uri = f"ws://{host}/v4/websocket"
-        logger.info(f"Использую WebSocket: {uri}")
+        host = lavalink_host.replace("http://", "").split("/")[0]
+        http_uri = f"http://{host}"
+        ws_uri = f"ws://{host}/v4/websocket"
+        logger.info(f"Использую HTTP: {http_uri}")
+        logger.info(f"Использую WebSocket: {ws_uri}")
     else:
-        uri = f"ws://{lavalink_host}/v4/websocket"
-        logger.info(f"Использую WebSocket: {uri}")
+        host = lavalink_host.split("/")[0]
+        http_uri = f"http://{host}"
+        ws_uri = f"ws://{host}/v4/websocket"
+        logger.info(f"Использую HTTP: {http_uri}")
+        logger.info(f"Использую WebSocket: {ws_uri}")
 
-    try:
-        node = wavelink.Node(
-            identifier="Node1",
-            uri=uri,
-            password=lavalink_password
-        )
+    # Пробуем подключиться несколько раз
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Попытка подключения к Lavalink #{attempt + 1}")
 
-        await wavelink.Pool.connect(client=bot, nodes=[node])
-        logger.info(f"Lavalink подключён к {lavalink_host}!")
-    except Exception as e:
-        logger.error(f"Ошибка подключения к Lavalink: {e}")
-        # Повторная попытка через 10 секунд
-        await asyncio.sleep(10)
+            # Создаем узел с правильным URI
+            node = wavelink.Node(
+                identifier="Node1",
+                uri=ws_uri,
+                password=lavalink_password,
+                reconnect_attempts=10,
+                reconnect_interval=5
+            )
+
+            # Подключаемся
+            await wavelink.Pool.connect(client=bot, nodes=[node])
+
+            # Ждем, пока узел будет готов
+            await asyncio.sleep(2)
+
+            if node.is_connected:
+                lavalink_ready = True
+                logger.info(f"✅ Lavalink успешно подключён к {lavalink_host}!")
+                return
+            else:
+                logger.warning(f"Узел не подключился, попытка {attempt + 1}")
+
+        except Exception as e:
+            logger.error(f"Ошибка подключения к Lavalink (попытка {attempt + 1}): {e}")
+            if attempt < max_retries - 1:
+                wait_time = 5 * (attempt + 1)
+                logger.info(f"Повторная попытка через {wait_time} секунд...")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error("❌ Не удалось подключиться к Lavalink после всех попыток!")
+                lavalink_ready = False
+
+
+# Проверка подключения к Lavalink перед выполнением команд
+async def check_lavalink(interaction):
+    global lavalink_ready
+    if not lavalink_ready:
+        # Пробуем переподключиться
         await connect_nodes()
+        if not lavalink_ready:
+            await interaction.followup.send("❌ Lavalink не подключен! Попробуйте позже.", ephemeral=True)
+            return False
+    return True
 
 
 # Событие при запуске
 @bot.event
 async def on_ready():
     logger.info(f"Бот {bot.user} запущен!")
-    await connect_nodes()
+    # Запускаем подключение к Lavalink в фоне
+    asyncio.create_task(connect_nodes())
     try:
         synced = await bot.tree.sync()
         logger.info(f"Синхронизировано {len(synced)} слэш-команд!")
@@ -86,13 +134,19 @@ async def on_ready():
 # Событие при подключении Lavalink
 @bot.event
 async def on_wavelink_node_ready(payload: wavelink.NodeReadyEventPayload):
-    logger.info(f"Узел {payload.node.identifier} готов!")
+    global lavalink_ready
+    lavalink_ready = True
+    logger.info(f"✅ Узел {payload.node.identifier} готов!")
 
 
 # Событие при отключении Lavalink
 @bot.event
 async def on_wavelink_node_disconnected(payload: wavelink.NodeDisconnectedEventPayload):
-    logger.error(f"Узел {payload.node.identifier} отключился!")
+    global lavalink_ready
+    lavalink_ready = False
+    logger.error(f"❌ Узел {payload.node.identifier} отключился!")
+    # Пытаемся переподключиться
+    asyncio.create_task(connect_nodes())
 
 
 # Функция для получения очереди по голосовому каналу
@@ -108,34 +162,22 @@ def is_url(string):
     return bool(url_pattern.match(string))
 
 
-# Функция для поиска треков с повторными попытками
-async def search_tracks(search_query, retries=3):
-    for attempt in range(retries):
-        try:
-            if is_url(search_query):
-                tracks = await wavelink.Playable.search(search_query)
-            else:
-                # Пробуем разные источники
-                tracks = await wavelink.Playable.search(f"ytsearch:{search_query}")
+# Функция для поиска треков
+async def search_tracks(search_query):
+    try:
+        if is_url(search_query):
+            tracks = await wavelink.Playable.search(search_query)
+            return tracks
 
-                if not tracks:
-                    # Пробуем без префикса
-                    tracks = await wavelink.Playable.search(search_query)
+        tracks = await wavelink.Playable.search(f"ytsearch:{search_query}")
 
-            if tracks:
-                return tracks
+        if not tracks:
+            tracks = await wavelink.Playable.search(search_query)
 
-            logger.warning(f"Попытка {attempt + 1}: треки не найдены для {search_query}")
-            await asyncio.sleep(1)
-
-        except Exception as e:
-            logger.error(f"Попытка {attempt + 1} поиска для {search_query}: {e}")
-            if attempt < retries - 1:
-                await asyncio.sleep(2)
-            else:
-                return None
-
-    return None
+        return tracks
+    except Exception as e:
+        logger.error(f"Ошибка поиска: {e}")
+        return None
 
 
 # Функция для создания эмбеда плеера
@@ -324,6 +366,10 @@ async def play(interaction: discord.Interaction, search: str):
     await interaction.response.defer()
 
     try:
+        # Проверяем подключение к Lavalink
+        if not await check_lavalink(interaction):
+            return
+
         if not interaction.user.voice:
             await interaction.followup.send("❌ Вы не в голосовом канале!", ephemeral=True)
             return
@@ -368,11 +414,213 @@ async def play(interaction: discord.Interaction, search: str):
                 await interaction.edit_original_response(content=f"❌ Ошибка воспроизведения: {e}")
     except Exception as e:
         logger.error(f"Критическая ошибка в play: {e}")
+        try:
+            await interaction.followup.send(f"❌ Произошла ошибка: {str(e)}", ephemeral=True)
+        except:
+            pass
+
+
+@bot.tree.command(name="queue", description="Показать текущую очередь")
+async def queue_command(interaction: discord.Interaction):
+    try:
+        if not await check_lavalink(interaction):
+            return
+
+        vc: wavelink.Player = interaction.guild.voice_client
+
+        if not vc:
+            await interaction.response.send_message("❌ Бот не в голосовом канале!", ephemeral=True)
+            return
+
+        queue = get_queue(interaction.guild.id)
+        embed = create_player_embed(vc, queue)
+        await interaction.response.send_message(embed=embed, view=PlayerView())
+    except Exception as e:
+        logger.error(f"Ошибка в queue: {e}")
+        await interaction.response.send_message(f"❌ Произошла ошибка: {str(e)}", ephemeral=True)
+
+
+@bot.tree.command(name="now", description="Показать что играет сейчас")
+async def now(interaction: discord.Interaction):
+    try:
+        if not await check_lavalink(interaction):
+            return
+
+        vc: wavelink.Player = interaction.guild.voice_client
+
+        if not vc or not vc.current:
+            await interaction.response.send_message("❌ Сейчас ничего не играет!", ephemeral=True)
+            return
+
+        queue = get_queue(interaction.guild.id)
+        embed = create_player_embed(vc, queue)
+        await interaction.response.send_message(embed=embed, view=PlayerView())
+    except Exception as e:
+        logger.error(f"Ошибка в now: {e}")
+        await interaction.response.send_message(f"❌ Произошла ошибка: {str(e)}", ephemeral=True)
+
+
+@bot.tree.command(name="skip", description="Пропустить текущий трек")
+async def skip(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    try:
+        if not await check_lavalink(interaction):
+            return
+
+        vc: wavelink.Player = interaction.guild.voice_client
+
+        if not vc or not vc.current:
+            await interaction.followup.send("❌ Сейчас ничего не играет!", ephemeral=True)
+            return
+
+        queue = get_queue(interaction.guild.id)
+
+        if queue:
+            await vc.stop()
+            await interaction.followup.send("⏭️ Трек пропущен! Следующий в очереди...")
+        else:
+            await vc.stop()
+            await interaction.followup.send("⏭️ Трек пропущен! Очередь пуста.")
+
+        await update_player_message(interaction, vc, queue)
+    except Exception as e:
+        logger.error(f"Ошибка в skip: {e}")
         await interaction.followup.send(f"❌ Произошла ошибка: {str(e)}", ephemeral=True)
 
 
-# Остальные команды остаются без изменений...
-# (queue, now, skip, stop, clear, pause, resume, leave)
+@bot.tree.command(name="stop", description="Остановить музыку и очистить очередь")
+async def stop(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    try:
+        if not await check_lavalink(interaction):
+            return
+
+        vc: wavelink.Player = interaction.guild.voice_client
+
+        if not vc:
+            await interaction.followup.send("❌ Бот не в голосовом канале!", ephemeral=True)
+            return
+
+        if not vc.current:
+            await interaction.followup.send("❌ Сейчас ничего не играет!", ephemeral=True)
+            return
+
+        queue = get_queue(interaction.guild.id)
+        queue.clear()
+
+        await vc.stop()
+        await interaction.followup.send("⏹️ Музыка остановлена! Очередь очищена!")
+
+        await update_player_message(interaction, vc, queue)
+    except Exception as e:
+        logger.error(f"Ошибка в stop: {e}")
+        await interaction.followup.send(f"❌ Произошла ошибка: {str(e)}", ephemeral=True)
+
+
+@bot.tree.command(name="clear", description="Очистить очередь без остановки текущей песни")
+async def clear(interaction: discord.Interaction):
+    try:
+        if not await check_lavalink(interaction):
+            return
+
+        vc: wavelink.Player = interaction.guild.voice_client
+
+        if not vc:
+            await interaction.response.send_message("❌ Бот не в голосовом канале!", ephemeral=True)
+            return
+
+        queue = get_queue(interaction.guild.id)
+        count = len(queue)
+
+        if count == 0:
+            await interaction.response.send_message("📭 Очередь уже пуста!", ephemeral=True)
+            return
+
+        queue.clear()
+        await interaction.response.send_message(f"🗑️ Очищено {count} треков из очереди!")
+
+        await update_player_message(interaction, vc, queue)
+    except Exception as e:
+        logger.error(f"Ошибка в clear: {e}")
+        await interaction.response.send_message(f"❌ Произошла ошибка: {str(e)}", ephemeral=True)
+
+
+@bot.tree.command(name="pause", description="Поставить на паузу")
+async def pause(interaction: discord.Interaction):
+    try:
+        if not await check_lavalink(interaction):
+            return
+
+        vc: wavelink.Player = interaction.guild.voice_client
+
+        if not vc or not vc.current:
+            await interaction.response.send_message("❌ Сейчас ничего не играет!", ephemeral=True)
+            return
+
+        if vc.paused:
+            await interaction.response.send_message("⏸️ Уже на паузе!", ephemeral=True)
+            return
+
+        await vc.pause(True)
+        await interaction.response.send_message("⏸️ На паузе!")
+
+        queue = get_queue(interaction.guild.id)
+        await update_player_message(interaction, vc, queue)
+    except Exception as e:
+        logger.error(f"Ошибка в pause: {e}")
+        await interaction.response.send_message(f"❌ Произошла ошибка: {str(e)}", ephemeral=True)
+
+
+@bot.tree.command(name="resume", description="Продолжить воспроизведение")
+async def resume(interaction: discord.Interaction):
+    try:
+        if not await check_lavalink(interaction):
+            return
+
+        vc: wavelink.Player = interaction.guild.voice_client
+
+        if not vc or not vc.current:
+            await interaction.response.send_message("❌ Сейчас ничего не играет!", ephemeral=True)
+            return
+
+        if not vc.paused:
+            await interaction.response.send_message("▶️ Уже играет!", ephemeral=True)
+            return
+
+        await vc.pause(False)
+        await interaction.response.send_message("▶️ Продолжаю!")
+
+        queue = get_queue(interaction.guild.id)
+        await update_player_message(interaction, vc, queue)
+    except Exception as e:
+        logger.error(f"Ошибка в resume: {e}")
+        await interaction.response.send_message(f"❌ Произошла ошибка: {str(e)}", ephemeral=True)
+
+
+@bot.tree.command(name="leave", description="Отключить бота и очистить очередь")
+async def leave(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    try:
+        if not await check_lavalink(interaction):
+            return
+
+        vc: wavelink.Player = interaction.guild.voice_client
+
+        if not vc:
+            await interaction.followup.send("❌ Бот не в голосовом канале!", ephemeral=True)
+            return
+
+        queue = get_queue(interaction.guild.id)
+        queue.clear()
+
+        await vc.disconnect()
+        await interaction.followup.send("👋 Бот отключён! Очередь очищена!")
+    except Exception as e:
+        logger.error(f"Ошибка в leave: {e}")
+        await interaction.followup.send(f"❌ Произошла ошибка: {str(e)}", ephemeral=True)
 
 
 # ========== HTTP-сервер для Railway ==========
