@@ -7,10 +7,10 @@ import os
 import asyncio
 from aiohttp import web
 
-# Создаём бота с поддержкой слэш-команд
+# Создаём бота с префиксными командами
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix=None, intents=intents)  # Убираем префикс
+bot = commands.Bot(command_prefix=">", intents=intents)
 
 # Словарь для хранения очередей для каждого голосового канала
 queues = {}
@@ -29,8 +29,8 @@ async def connect_nodes():
 
     # Если переменные не заданы - используем значения по умолчанию
     if not lavalink_host:
-        lavalink_host = "http://localhost:2333"
-        print("⚠️ LAVALINK_HOST не задан, использую http://localhost:2333")
+        lavalink_host = "http://78.154.103.11:15193/"
+        print("⚠️ LAVALINK_HOST не задан, использую дефолтный хост")
     else:
         print(f"✅ LAVALINK_HOST: {lavalink_host}")
 
@@ -38,7 +38,6 @@ async def connect_nodes():
         lavalink_password = "youshallnotpass"
         print("⚠️ LAVALINK_PASSWORD не задан, использую стандартный пароль")
 
-    # Для Railway используем wss:// если это HTTPS
     if lavalink_host.startswith("https://"):
         uri = lavalink_host.replace("https://", "wss://")
         print(f"🔒 Использую WebSocket Secure: {uri}")
@@ -64,11 +63,6 @@ async def connect_nodes():
 async def on_ready():
     print(f"✅ Бот {bot.user} запущен!")
     await connect_nodes()
-    try:
-        synced = await bot.tree.sync()
-        print(f"✅ Синхронизировано {len(synced)} слэш-команд!")
-    except Exception as e:
-        print(f"❌ Ошибка синхронизации команд: {e}")
 
 
 # Событие при подключении Lavalink
@@ -163,15 +157,22 @@ def create_player_embed(vc: wavelink.Player, queue):
 
 
 # Функция для обновления сообщения плеера
-async def update_player_message(interaction, vc: wavelink.Player, queue):
+async def update_player_message(ctx, vc: wavelink.Player, queue, interaction=None):
     try:
         embed = create_player_embed(vc, queue)
 
-        guild_id = interaction.guild.id
-        channel_id = interaction.channel.id
+        guild_id = ctx.guild.id if hasattr(ctx, 'guild') else ctx.interaction.guild.id
+        channel_id = ctx.channel.id if hasattr(ctx, 'channel') else ctx.interaction.channel.id
 
         if guild_id not in player_messages:
             player_messages[guild_id] = {}
+
+        if interaction:
+            try:
+                await interaction.edit_original_response(embed=embed, view=PlayerView())
+                return
+            except:
+                pass
 
         if channel_id in player_messages[guild_id]:
             try:
@@ -179,16 +180,17 @@ async def update_player_message(interaction, vc: wavelink.Player, queue):
                 await msg.edit(embed=embed, view=PlayerView())
                 return
             except discord.NotFound:
+                # Сообщение было удалено, создаем новое
                 pass
             except Exception as e:
                 print(f"Ошибка обновления сообщения: {e}")
 
-        # Создаем новое сообщение
-        msg = await interaction.followup.send(embed=embed, view=PlayerView(), wait=True)
-        player_messages[guild_id][channel_id] = msg
+        # Создаем новое сообщение только если контекст это позволяет
+        if hasattr(ctx, 'send'):
+            msg = await ctx.send(embed=embed, view=PlayerView())
+            player_messages[guild_id][channel_id] = msg
     except Exception as e:
         print(f"Критическая ошибка в update_player_message: {e}")
-
 
 # Класс для обработки кнопок
 class PlayerView(discord.ui.View):
@@ -207,7 +209,7 @@ class PlayerView(discord.ui.View):
                 await vc.pause(True)
                 button.label = "▶️"
             queue = get_queue(interaction.guild.id)
-            await update_player_message(interaction, vc, queue)
+            await update_player_message(interaction, vc, queue, interaction)
 
     @discord.ui.button(label="⏹️", style=discord.ButtonStyle.danger)
     async def stop_button(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -217,7 +219,7 @@ class PlayerView(discord.ui.View):
             queue = get_queue(interaction.guild.id)
             queue.clear()
             await vc.stop()
-            await update_player_message(interaction, vc, queue)
+            await update_player_message(interaction, vc, queue, interaction)
 
     @discord.ui.button(label="⏭️", style=discord.ButtonStyle.primary)
     async def skip_button(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -226,7 +228,7 @@ class PlayerView(discord.ui.View):
         if vc and vc.current:
             queue = get_queue(interaction.guild.id)
             await vc.stop()
-            await update_player_message(interaction, vc, queue)
+            await update_player_message(interaction, vc, queue, interaction)
 
     @discord.ui.button(label="⏏️", style=discord.ButtonStyle.secondary)
     async def leave_button(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -259,12 +261,14 @@ async def on_wavelink_track_end(payload: wavelink.TrackEndEventPayload):
     if not vc or not vc.guild:
         return
 
+    # Проверяем, что бот все еще в голосовом канале
     if not vc.channel:
         return
 
     guild_id = vc.guild.id
     queue = get_queue(guild_id)
 
+    # Проверяем, что это не ошибка или остановка
     if payload.reason == wavelink.TrackEndReason.STOPPED:
         return
 
@@ -277,6 +281,7 @@ async def on_wavelink_track_end(payload: wavelink.TrackEndEventPayload):
             print(f"Ошибка при воспроизведении следующего трека: {e}")
             return
 
+        # Обновляем сообщение только если есть voice client
         if vc and vc.channel:
             try:
                 if guild_id in player_messages:
@@ -285,6 +290,7 @@ async def on_wavelink_track_end(payload: wavelink.TrackEndEventPayload):
                             embed = create_player_embed(vc, queue)
                             await msg.edit(embed=embed, view=PlayerView())
                         except discord.NotFound:
+                            # Удаляем несуществующее сообщение из словаря
                             if guild_id in player_messages and channel_id in player_messages[guild_id]:
                                 del player_messages[guild_id][channel_id]
                         except Exception as e:
@@ -293,191 +299,189 @@ async def on_wavelink_track_end(payload: wavelink.TrackEndEventPayload):
                 print(f"Ошибка в on_wavelink_track_end: {e}")
 
 
-# ========== СЛЭШ-КОМАНДЫ ==========
+# ========== КОМАНДЫ ==========
 
-@bot.tree.command(name="play", description="Воспроизвести музыку или добавить в очередь")
-async def play(interaction: discord.Interaction, search: str):
-    await interaction.response.defer()
+# >play
+@bot.command(name="play", description="Воспроизвести музыку или добавить в очередь")
+async def play(ctx: commands.Context, *, search: str):
+    # Отправляем "печатает..." чтобы Discord знал, что бот работает
+    async with ctx.typing():
+        if not ctx.author.voice:
+            return await ctx.send("❌ Вы не в голосовом канале!")
 
-    if not interaction.user.voice:
-        return await interaction.followup.send("❌ Вы не в голосовом канале!", ephemeral=True)
+        channel = ctx.author.voice.channel
+        vc: wavelink.Player = ctx.voice_client
 
-    channel = interaction.user.voice.channel
-    vc: wavelink.Player = interaction.guild.voice_client
+        if not vc:
+            vc = await channel.connect(cls=wavelink.Player)
+        elif vc.channel.id != channel.id:
+            await vc.move_to(channel)
+
+        # Отправляем начальное сообщение
+        msg = await ctx.send(f"🔍 Ищу: `{search}`...")
+
+        tracks = await search_tracks(search)
+
+        if tracks is None:
+            return await msg.edit(content="❌ Ошибка при поиске! Попробуйте использовать ссылку или другой запрос.")
+
+        if not tracks:
+            return await msg.edit(
+                content="❌ Ничего не найдено! Попробуйте другой запрос или используйте ссылку на YouTube.")
+
+        track = tracks[0]
+        queue = get_queue(ctx.guild.id)
+
+        if vc.current:
+            queue.append(track)
+            position = len(queue)
+            await msg.edit(content=f"✅ Добавлено в очередь (позиция {position}): `{track.title}`")
+        else:
+            try:
+                await vc.play(track)
+                await msg.edit(content=f"▶️ Сейчас играет: `{track.title}`")
+                await update_player_message(ctx, vc, queue)
+            except Exception as e:
+                print(f"Ошибка воспроизведения: {e}")
+                await msg.edit(content=f"❌ Ошибка воспроизведения: {e}")
+
+
+# >queue
+@bot.command(name="queue", description="Показать текущую очередь")
+async def queue_command(ctx: commands.Context):
+    vc: wavelink.Player = ctx.voice_client
 
     if not vc:
-        vc = await channel.connect(cls=wavelink.Player)
-    elif vc.channel.id != channel.id:
-        await vc.move_to(channel)
+        return await ctx.send("❌ Бот не в голосовом канале!")
 
-    await interaction.followup.send(f"🔍 Ищу: `{search}`...")
-
-    tracks = await search_tracks(search)
-
-    if tracks is None:
-        return await interaction.edit_original_response(
-            content="❌ Ошибка при поиске! Попробуйте использовать ссылку или другой запрос.")
-
-    if not tracks:
-        return await interaction.edit_original_response(
-            content="❌ Ничего не найдено! Попробуйте другой запрос или используйте ссылку на YouTube.")
-
-    track = tracks[0]
-    queue = get_queue(interaction.guild.id)
-
-    if vc.current:
-        queue.append(track)
-        position = len(queue)
-        await interaction.edit_original_response(
-            content=f"✅ Добавлено в очередь (позиция {position}): `{track.title}`")
-    else:
-        try:
-            await vc.play(track)
-            await interaction.edit_original_response(
-                content=f"▶️ Сейчас играет: `{track.title}`")
-            await update_player_message(interaction, vc, queue)
-        except Exception as e:
-            print(f"Ошибка воспроизведения: {e}")
-            await interaction.edit_original_response(
-                content=f"❌ Ошибка воспроизведения: {e}")
-
-
-@bot.tree.command(name="queue", description="Показать текущую очередь")
-async def queue_command(interaction: discord.Interaction):
-    vc: wavelink.Player = interaction.guild.voice_client
-
-    if not vc:
-        return await interaction.response.send_message("❌ Бот не в голосовом канале!", ephemeral=True)
-
-    queue = get_queue(interaction.guild.id)
+    queue = get_queue(ctx.guild.id)
     embed = create_player_embed(vc, queue)
-    await interaction.response.send_message(embed=embed, view=PlayerView())
+    await ctx.send(embed=embed, view=PlayerView())
 
 
-@bot.tree.command(name="now", description="Показать что играет сейчас")
-async def now(interaction: discord.Interaction):
-    vc: wavelink.Player = interaction.guild.voice_client
+# >now
+@bot.command(name="now", description="Показать что играет сейчас")
+async def now(ctx: commands.Context):
+    vc: wavelink.Player = ctx.voice_client
 
     if not vc or not vc.current:
-        return await interaction.response.send_message("❌ Сейчас ничего не играет!", ephemeral=True)
+        return await ctx.send("❌ Сейчас ничего не играет!")
 
-    queue = get_queue(interaction.guild.id)
+    queue = get_queue(ctx.guild.id)
     embed = create_player_embed(vc, queue)
-    await interaction.response.send_message(embed=embed, view=PlayerView())
+    await ctx.send(embed=embed, view=PlayerView())
 
 
-@bot.tree.command(name="skip", description="Пропустить текущий трек")
-async def skip(interaction: discord.Interaction):
-    await interaction.response.defer()
-
-    vc: wavelink.Player = interaction.guild.voice_client
+# >skip
+@bot.command(name="skip", description="Пропустить текущий трек")
+async def skip(ctx: commands.Context):
+    vc: wavelink.Player = ctx.voice_client
 
     if not vc or not vc.current:
-        return await interaction.followup.send("❌ Сейчас ничего не играет!", ephemeral=True)
+        return await ctx.send("❌ Сейчас ничего не играет!")
 
-    queue = get_queue(interaction.guild.id)
+    queue = get_queue(ctx.guild.id)
 
     if queue:
         await vc.stop()
-        await interaction.followup.send("⏭️ Трек пропущен! Следующий в очереди...")
+        await ctx.send("⏭️ Трек пропущен! Следующий в очереди...")
     else:
         await vc.stop()
-        await interaction.followup.send("⏭️ Трек пропущен! Очередь пуста.")
+        await ctx.send("⏭️ Трек пропущен! Очередь пуста.")
 
-    await update_player_message(interaction, vc, queue)
+    await update_player_message(ctx, vc, queue)
 
 
-@bot.tree.command(name="stop", description="Остановить музыку и очистить очередь")
-async def stop(interaction: discord.Interaction):
-    await interaction.response.defer()
-
-    vc: wavelink.Player = interaction.guild.voice_client
+# >stop
+@bot.command(name="stop", description="Остановить музыку и очистить очередь")
+async def stop(ctx: commands.Context):
+    vc: wavelink.Player = ctx.voice_client
 
     if not vc:
-        return await interaction.followup.send("❌ Бот не в голосовом канале!", ephemeral=True)
+        return await ctx.send("❌ Бот не в голосовом канале!")
 
     if not vc.current:
-        return await interaction.followup.send("❌ Сейчас ничего не играет!", ephemeral=True)
+        return await ctx.send("❌ Сейчас ничего не играет!")
 
-    queue = get_queue(interaction.guild.id)
+    queue = get_queue(ctx.guild.id)
     queue.clear()
 
     await vc.stop()
-    await interaction.followup.send("⏹️ Музыка остановлена! Очередь очищена!")
+    await ctx.send("⏹️ Музыка остановлена! Очередь очищена!")
 
-    await update_player_message(interaction, vc, queue)
+    await update_player_message(ctx, vc, queue)
 
 
-@bot.tree.command(name="clear", description="Очистить очередь без остановки текущей песни")
-async def clear(interaction: discord.Interaction):
-    vc: wavelink.Player = interaction.guild.voice_client
+# >clear
+@bot.command(name="clear", description="Очистить очередь без остановки текущей песни")
+async def clear(ctx: commands.Context):
+    vc: wavelink.Player = ctx.voice_client
 
     if not vc:
-        return await interaction.response.send_message("❌ Бот не в голосовом канале!", ephemeral=True)
+        return await ctx.send("❌ Бот не в голосовом канале!")
 
-    queue = get_queue(interaction.guild.id)
+    queue = get_queue(ctx.guild.id)
     count = len(queue)
 
     if count == 0:
-        return await interaction.response.send_message("📭 Очередь уже пуста!", ephemeral=True)
+        return await ctx.send("📭 Очередь уже пуста!")
 
     queue.clear()
-    await interaction.response.send_message(f"🗑️ Очищено {count} треков из очереди!")
+    await ctx.send(f"🗑️ Очищено {count} треков из очереди!")
 
-    await update_player_message(interaction, vc, queue)
+    await update_player_message(ctx, vc, queue)
 
 
-@bot.tree.command(name="pause", description="Поставить на паузу")
-async def pause(interaction: discord.Interaction):
-    vc: wavelink.Player = interaction.guild.voice_client
+# >pause
+@bot.command(name="pause", description="Поставить на паузу")
+async def pause(ctx: commands.Context):
+    vc: wavelink.Player = ctx.voice_client
 
     if not vc or not vc.current:
-        return await interaction.response.send_message("❌ Сейчас ничего не играет!", ephemeral=True)
+        return await ctx.send("❌ Сейчас ничего не играет!")
 
     if vc.paused:
-        return await interaction.response.send_message("⏸️ Уже на паузе!", ephemeral=True)
+        return await ctx.send("⏸️ Уже на паузе!")
 
     await vc.pause(True)
-    await interaction.response.send_message("⏸️ На паузе!")
+    await ctx.send("⏸️ На паузе!")
 
-    queue = get_queue(interaction.guild.id)
-    await update_player_message(interaction, vc, queue)
+    queue = get_queue(ctx.guild.id)
+    await update_player_message(ctx, vc, queue)
 
 
-@bot.tree.command(name="resume", description="Продолжить воспроизведение")
-async def resume(interaction: discord.Interaction):
-    vc: wavelink.Player = interaction.guild.voice_client
+# >resume
+@bot.command(name="resume", description="Продолжить воспроизведение")
+async def resume(ctx: commands.Context):
+    vc: wavelink.Player = ctx.voice_client
 
     if not vc or not vc.current:
-        return await interaction.response.send_message("❌ Сейчас ничего не играет!", ephemeral=True)
+        return await ctx.send("❌ Сейчас ничего не играет!")
 
     if not vc.paused:
-        return await interaction.response.send_message("▶️ Уже играет!", ephemeral=True)
+        return await ctx.send("▶️ Уже играет!")
 
     await vc.pause(False)
-    await interaction.response.send_message("▶️ Продолжаю!")
+    await ctx.send("▶️ Продолжаю!")
 
-    queue = get_queue(interaction.guild.id)
-    await update_player_message(interaction, vc, queue)
+    queue = get_queue(ctx.guild.id)
+    await update_player_message(ctx, vc, queue)
 
 
-@bot.tree.command(name="leave", description="Отключить бота и очистить очередь")
-async def leave(interaction: discord.Interaction):
-    await interaction.response.defer()
-
-    vc: wavelink.Player = interaction.guild.voice_client
+# >leave
+@bot.command(name="leave", description="Отключить бота и очистить очередь")
+async def leave(ctx: commands.Context):
+    vc: wavelink.Player = ctx.voice_client
 
     if not vc:
-        return await interaction.followup.send("❌ Бот не в голосовом канале!", ephemeral=True)
+        return await ctx.send("❌ Бот не в голосовом канале!")
 
-    queue = get_queue(interaction.guild.id)
+    queue = get_queue(ctx.guild.id)
     queue.clear()
 
     await vc.disconnect()
-    await interaction.followup.send("👋 Бот отключён! Очередь очищена!")
+    await ctx.send("👋 Бот отключён! Очередь очищена!")
 
-
-# ========== HTTP-сервер для Railway ==========
 
 async def health_check(request):
     return web.Response(text="OK")
@@ -499,11 +503,11 @@ async def main():
 
     # Запускаем бота
     token = os.getenv("DISCORD_TOKEN")
-    if not token:
-        print("❌ Ошибка: DISCORD_TOKEN не найден в переменных окружения!")
-        return
+    # if not token:
+    #     print("❌ Ошибка: DISCORD_TOKEN не найден в переменных окружения!")
+    #     return
 
-    await bot.start(token)
+    await bot.start("-")
 
 
 # ========== ЗАПУСК ==========
