@@ -30,8 +30,6 @@ async def connect_nodes():
     lavalink_host = os.getenv("LAVALINK_HOST", "http://78.154.103.11:15193/")
     lavalink_password = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
 
-    print(f"🔗 Подключение к Lavalink: {lavalink_host}")
-
     if lavalink_host.startswith("https://"):
         uri = lavalink_host.replace("https://", "wss://")
     else:
@@ -78,7 +76,6 @@ def is_url(string):
     return bool(url_pattern.match(string))
 
 
-# ВОЗВРАЩАЕМ РАБОЧУЮ ФУНКЦИЮ ПОИСКА
 async def search_tracks(search_query):
     try:
         if is_url(search_query):
@@ -96,7 +93,6 @@ async def search_tracks(search_query):
         return None
 
 
-# Функция для создания эмбеда плеера
 def create_player_embed(vc: wavelink.Player, queue):
     current = vc.current
     status = "⏸️ На паузе" if vc.paused else "▶️ Играет"
@@ -109,7 +105,6 @@ def create_player_embed(vc: wavelink.Player, queue):
 
     if current:
         duration = f"{current.length // 60000}:{(current.length % 60000) // 1000:02d}"
-
         embed.add_field(
             name="🎶 Сейчас играет",
             value=f"**{current.title}**\n⏱️ {duration}",
@@ -144,24 +139,29 @@ def create_player_embed(vc: wavelink.Player, queue):
     return embed
 
 
-# Функция для обновления сообщения плеера
 async def update_player_message(ctx, vc: wavelink.Player, queue, interaction=None):
     try:
         embed = create_player_embed(vc, queue)
 
-        guild_id = ctx.guild.id if hasattr(ctx, 'guild') else ctx.interaction.guild.id
-        channel_id = ctx.channel.id if hasattr(ctx, 'channel') else ctx.interaction.channel.id
+        if hasattr(ctx, 'guild'):
+            guild_id = ctx.guild.id
+            channel_id = ctx.channel.id
+        else:
+            guild_id = interaction.guild.id
+            channel_id = interaction.channel.id
 
         if guild_id not in player_messages:
             player_messages[guild_id] = {}
 
+        # Если это взаимодействие (кнопка)
         if interaction:
             try:
                 await interaction.edit_original_response(embed=embed, view=PlayerView())
                 return
-            except:
-                pass
+            except Exception as e:
+                print(f"Ошибка редактирования через interaction: {e}")
 
+        # Если есть сохраненное сообщение
         if channel_id in player_messages[guild_id]:
             try:
                 msg = player_messages[guild_id][channel_id]
@@ -172,17 +172,19 @@ async def update_player_message(ctx, vc: wavelink.Player, queue, interaction=Non
             except Exception as e:
                 print(f"Ошибка обновления сообщения: {e}")
 
+        # Создаем новое сообщение
         if hasattr(ctx, 'send'):
             msg = await ctx.send(embed=embed, view=PlayerView())
             player_messages[guild_id][channel_id] = msg
         elif hasattr(ctx, 'followup'):
             msg = await ctx.followup.send(embed=embed, view=PlayerView())
-            player_messages[guild_id][channel_id] = msg
+            if ctx.message:
+                player_messages[guild_id][channel_id] = msg
+
     except Exception as e:
         print(f"Критическая ошибка в update_player_message: {e}")
 
 
-# Функция для воспроизведения следующего трека
 async def play_next_track(vc: wavelink.Player, guild_id: int):
     if is_playing_next.get(guild_id, False):
         return
@@ -222,62 +224,122 @@ async def play_next_track(vc: wavelink.Player, guild_id: int):
         is_playing_next[guild_id] = False
 
 
-# Класс для обработки кнопок
+# Класс для обработки кнопок - ИСПРАВЛЕННАЯ ВЕРСИЯ
 class PlayerView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="⏸️", style=discord.ButtonStyle.primary)
-    async def pause_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await interaction.response.defer()
-        vc: wavelink.Player = interaction.guild.voice_client
-        if vc and vc.current:
-            if vc.paused:
-                await vc.pause(False)
-                button.label = "⏸️"
+    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Кнопка паузы/возобновления"""
+        try:
+            await interaction.response.defer()
+
+            vc: wavelink.Player = interaction.guild.voice_client
+            if vc and vc.current:
+                if vc.paused:
+                    await vc.pause(False)
+                    button.label = "⏸️"
+                else:
+                    await vc.pause(True)
+                    button.label = "▶️"
+
+                queue = get_queue(interaction.guild.id)
+                await update_player_message(interaction, vc, queue, interaction)
             else:
-                await vc.pause(True)
-                button.label = "▶️"
-            queue = get_queue(interaction.guild.id)
-            await update_player_message(interaction, vc, queue, interaction)
+                await interaction.followup.send("❌ Нет активного плеера", ephemeral=True)
+        except Exception as e:
+            print(f"Ошибка в pause_button: {e}")
+            try:
+                await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
+            except:
+                pass
 
     @discord.ui.button(label="⏹️", style=discord.ButtonStyle.danger)
-    async def stop_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await interaction.response.defer()
-        vc: wavelink.Player = interaction.guild.voice_client
-        if vc and vc.current:
-            queue = get_queue(interaction.guild.id)
-            queue.clear()
-            await vc.stop()
-            await update_player_message(interaction, vc, queue, interaction)
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Кнопка остановки"""
+        try:
+            await interaction.response.defer()
+
+            vc: wavelink.Player = interaction.guild.voice_client
+            if vc and vc.current:
+                queue = get_queue(interaction.guild.id)
+                queue.clear()
+                await vc.stop()
+                await update_player_message(interaction, vc, queue, interaction)
+                await interaction.followup.send("⏹️ Музыка остановлена! Очередь очищена!", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ Нет активного плеера", ephemeral=True)
+        except Exception as e:
+            print(f"Ошибка в stop_button: {e}")
+            try:
+                await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
+            except:
+                pass
 
     @discord.ui.button(label="⏭️", style=discord.ButtonStyle.primary)
-    async def skip_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await interaction.response.defer()
-        vc: wavelink.Player = interaction.guild.voice_client
-        if vc and vc.current:
-            queue = get_queue(interaction.guild.id)
-            await vc.stop()
-            await update_player_message(interaction, vc, queue, interaction)
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Кнопка пропуска - ИСПРАВЛЕНА"""
+        try:
+            await interaction.response.defer()
+
+            vc: wavelink.Player = interaction.guild.voice_client
+            if vc and vc.current:
+                queue = get_queue(interaction.guild.id)
+
+                # Проверяем, есть ли треки в очереди
+                if queue:
+                    # Останавливаем текущий трек - это вызовет on_wavelink_track_end,
+                    # который запустит следующий трек
+                    await vc.stop()
+                    await interaction.followup.send("⏭️ Трек пропущен! Следующий в очереди...", ephemeral=True)
+                else:
+                    # Если очередь пуста, просто останавливаем
+                    await vc.stop()
+                    await interaction.followup.send("⏭️ Трек пропущен! Очередь пуста.", ephemeral=True)
+
+                # Обновляем плеер
+                await update_player_message(interaction, vc, queue, interaction)
+            else:
+                await interaction.followup.send("❌ Нет активного плеера", ephemeral=True)
+        except Exception as e:
+            print(f"Ошибка в skip_button: {e}")
+            try:
+                await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
+            except:
+                pass
 
     @discord.ui.button(label="⏏️", style=discord.ButtonStyle.secondary)
-    async def leave_button(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await interaction.response.defer()
-        vc: wavelink.Player = interaction.guild.voice_client
-        if vc:
-            queue = get_queue(interaction.guild.id)
-            queue.clear()
-            await vc.disconnect()
-            guild_id = interaction.guild.id
-            if guild_id in player_messages:
-                channel_id = interaction.channel.id
-                if channel_id in player_messages[guild_id]:
-                    try:
-                        await player_messages[guild_id][channel_id].delete()
-                    except:
-                        pass
-                    del player_messages[guild_id][channel_id]
-            await interaction.followup.send("👋 Бот отключён!", ephemeral=True)
+    async def leave_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        """Кнопка отключения"""
+        try:
+            await interaction.response.defer()
+
+            vc: wavelink.Player = interaction.guild.voice_client
+            if vc:
+                queue = get_queue(interaction.guild.id)
+                queue.clear()
+                await vc.disconnect()
+
+                guild_id = interaction.guild.id
+                if guild_id in player_messages:
+                    channel_id = interaction.channel.id
+                    if channel_id in player_messages[guild_id]:
+                        try:
+                            await player_messages[guild_id][channel_id].delete()
+                        except:
+                            pass
+                        del player_messages[guild_id][channel_id]
+
+                await interaction.followup.send("👋 Бот отключён!", ephemeral=True)
+            else:
+                await interaction.followup.send("❌ Бот не в голосовом канале", ephemeral=True)
+        except Exception as e:
+            print(f"Ошибка в leave_button: {e}")
+            try:
+                await interaction.followup.send(f"❌ Ошибка: {e}", ephemeral=True)
+            except:
+                pass
 
 
 # ========== СЛЕШ-КОМАНДЫ ==========
@@ -301,12 +363,10 @@ async def play(interaction: discord.Interaction, search: str):
         tracks = await search_tracks(search)
 
         if tracks is None:
-            return await interaction.followup.send(
-                "❌ Ошибка при поиске! Попробуйте использовать ссылку или другой запрос.")
+            return await interaction.followup.send("❌ Ошибка при поиске!")
 
         if not tracks:
-            return await interaction.followup.send(
-                "❌ Ничего не найдено! Попробуйте другой запрос или используйте ссылку на YouTube.")
+            return await interaction.followup.send("❌ Ничего не найдено!")
 
         track = tracks[0]
         queue = get_queue(interaction.guild.id)
@@ -322,10 +382,8 @@ async def play(interaction: discord.Interaction, search: str):
                 await interaction.followup.send(f"▶️ Сейчас играет: `{track.title}`")
                 await update_player_message(interaction, vc, queue, interaction)
             except Exception as e:
-                logger.error(f"Ошибка воспроизведения: {e}")
                 await interaction.followup.send(f"❌ Ошибка воспроизведения: {e}")
     except Exception as e:
-        logger.error(f"Ошибка в команде play: {e}")
         await interaction.followup.send(f"❌ Произошла ошибка: {e}")
 
 
@@ -440,10 +498,23 @@ async def on_wavelink_track_end(payload: wavelink.TrackEndEventPayload):
     vc: wavelink.Player = payload.player
     if not vc or not vc.guild or not vc.channel:
         return
+
     guild_id = vc.guild.id
     reason = str(payload.reason) if payload.reason else "unknown"
-    if reason.lower() in ["stopped", "replaced"]:
+
+    # Если трек был остановлен вручную (кнопкой skip),
+    # но в очереди есть треки - все равно запускаем следующий
+    if reason.lower() == "stopped":
+        queue = get_queue(guild_id)
+        if queue:
+            # В очереди есть треки - запускаем следующий
+            await asyncio.sleep(0.5)
+            await play_next_track(vc, guild_id)
         return
+
+    if reason.lower() == "replaced":
+        return
+
     await asyncio.sleep(0.5)
     await play_next_track(vc, guild_id)
 
