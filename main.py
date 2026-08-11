@@ -7,6 +7,7 @@ import os
 import asyncio
 from aiohttp import web
 import logging
+import sys
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -21,6 +22,60 @@ bot = commands.Bot(command_prefix=">", intents=intents)
 queues = {}
 player_messages = {}
 is_playing_next = {}
+
+
+# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С ПЛЕЕРОМ ==========
+
+async def get_or_create_player(interaction: discord.Interaction) -> tuple:
+    """
+    Получает существующий плеер или создает новый.
+    Возвращает (player, error_message)
+    """
+    # Проверяем, есть ли пользователь в голосовом канале
+    if not interaction.user.voice:
+        return None, "❌ Вы не в голосовом канале!"
+
+    vc: wavelink.Player = interaction.guild.voice_client
+
+    # Если плеера нет - создаем
+    if not vc:
+        try:
+            channel = interaction.user.voice.channel
+            vc = await channel.connect(cls=wavelink.Player)
+            return vc, None
+        except Exception as e:
+            logger.error(f"Ошибка создания плеера: {e}")
+            return None, f"❌ Не удалось подключиться к голосовому каналу: {e}"
+
+    # Проверяем, существует ли плеер в Lavalink
+    try:
+        # Пытаемся получить состояние плеера
+        await vc.node._update_player(interaction.guild.id)
+        return vc, None
+    except wavelink.exceptions.LavalinkException as e:
+        if "404" in str(e) or "Not Found" in str(e):
+            # Сессия потеряна - пересоздаем
+            logger.warning(f"Сессия потеряна, пересоздаем плеер для {interaction.guild.id}")
+            try:
+                await vc.disconnect(force=True)
+            except:
+                pass
+
+            # Создаем новый плеер
+            channel = interaction.user.voice.channel
+            vc = await channel.connect(cls=wavelink.Player)
+
+            # Очищаем очередь для этой гильдии
+            if interaction.guild.id in queues:
+                queues[interaction.guild.id].clear()
+
+            return vc, None
+        else:
+            logger.error(f"Ошибка Lavalink: {e}")
+            return None, f"❌ Ошибка Lavalink: {e}"
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка: {e}")
+        return None, f"❌ Ошибка: {e}"
 
 
 async def connect_nodes():
@@ -38,7 +93,6 @@ async def connect_nodes():
 
     # Убираем порт из URI если он есть
     if ":" in uri and not uri.startswith("ws"):
-        # Оставляем только хост и порт
         uri = uri.split(":")[0] + ":" + uri.split(":")[1]
 
     try:
@@ -48,6 +102,22 @@ async def connect_nodes():
         )
         await wavelink.Pool.connect(client=bot, nodes=[node])
         logger.info(f"✅ Lavalink подключён к {lavalink_host}!")
+
+        # Очищаем старые сессии
+        queues.clear()
+        player_messages.clear()
+        is_playing_next.clear()
+
+        # Отключаем бота от всех голосовых каналов
+        for guild in bot.guilds:
+            if guild.voice_client:
+                try:
+                    await guild.voice_client.disconnect(force=True)
+                except:
+                    pass
+
+        logger.info("✅ Старые сессии очищены!")
+
     except Exception as e:
         logger.error(f"❌ Ошибка подключения к Lavalink: {e}")
 
@@ -356,23 +426,17 @@ class PlayerView(discord.ui.View):
                 pass
 
 
-# ========== СЛЕШ-КОМАНДЫ ==========
+# ========== СЛЕШ-КОМАНДЫ (с автоматическим восстановлением) ==========
 
 @bot.tree.command(name="play", description="Воспроизвести музыку или добавить в очередь")
 async def play(interaction: discord.Interaction, search: str):
     await interaction.response.defer()
 
     try:
-        if not interaction.user.voice:
-            return await interaction.followup.send("❌ Вы не в голосовом канале!")
-
-        channel = interaction.user.voice.channel
-        vc: wavelink.Player = interaction.guild.voice_client
-
-        if not vc:
-            vc = await channel.connect(cls=wavelink.Player)
-        elif vc.channel.id != channel.id:
-            await vc.move_to(channel)
+        # Получаем или создаем плеер
+        vc, error = await get_or_create_player(interaction)
+        if error:
+            return await interaction.followup.send(error)
 
         tracks = await search_tracks(search)
 
@@ -398,111 +462,173 @@ async def play(interaction: discord.Interaction, search: str):
             except Exception as e:
                 await interaction.followup.send(f"❌ Ошибка воспроизведения: {e}")
     except Exception as e:
+        logger.error(f"Ошибка в play: {e}")
         await interaction.followup.send(f"❌ Произошла ошибка: {e}")
 
 
 @bot.tree.command(name="queue", description="Показать текущую очередь")
 async def queue_command(interaction: discord.Interaction):
-    vc: wavelink.Player = interaction.guild.voice_client
-    if not vc:
-        return await interaction.response.send_message("❌ Бот не в голосовом канале!")
-    queue = get_queue(interaction.guild.id)
-    embed = create_player_embed(vc, queue)
-    await interaction.response.send_message(embed=embed, view=PlayerView())
+    try:
+        vc, error = await get_or_create_player(interaction)
+        if error:
+            return await interaction.response.send_message(error)
+
+        queue = get_queue(interaction.guild.id)
+        embed = create_player_embed(vc, queue)
+        await interaction.response.send_message(embed=embed, view=PlayerView())
+    except Exception as e:
+        logger.error(f"Ошибка в queue: {e}")
+        await interaction.response.send_message(f"❌ Произошла ошибка: {e}")
 
 
 @bot.tree.command(name="now", description="Показать что играет сейчас")
 async def now(interaction: discord.Interaction):
-    vc: wavelink.Player = interaction.guild.voice_client
-    if not vc or not vc.current:
-        return await interaction.response.send_message("❌ Сейчас ничего не играет!")
-    queue = get_queue(interaction.guild.id)
-    embed = create_player_embed(vc, queue)
-    await interaction.response.send_message(embed=embed, view=PlayerView())
+    try:
+        vc, error = await get_or_create_player(interaction)
+        if error:
+            return await interaction.response.send_message(error)
+
+        if not vc.current:
+            return await interaction.response.send_message("❌ Сейчас ничего не играет!")
+
+        queue = get_queue(interaction.guild.id)
+        embed = create_player_embed(vc, queue)
+        await interaction.response.send_message(embed=embed, view=PlayerView())
+    except Exception as e:
+        logger.error(f"Ошибка в now: {e}")
+        await interaction.response.send_message(f"❌ Произошла ошибка: {e}")
 
 
 @bot.tree.command(name="skip", description="Пропустить текущий трек")
 async def skip(interaction: discord.Interaction):
     await interaction.response.defer()
-    vc: wavelink.Player = interaction.guild.voice_client
-    if not vc or not vc.current:
-        return await interaction.followup.send("❌ Сейчас ничего не играет!")
-    queue = get_queue(interaction.guild.id)
-    if queue:
-        await vc.stop()
-        await interaction.followup.send("⏭️ Трек пропущен! Следующий в очереди...")
-    else:
-        await vc.stop()
-        await interaction.followup.send("⏭️ Трек пропущен! Очередь пуста.")
-    await update_player_message(interaction, vc, queue, interaction)
+
+    try:
+        vc, error = await get_or_create_player(interaction)
+        if error:
+            return await interaction.followup.send(error)
+
+        if not vc.current:
+            return await interaction.followup.send("❌ Сейчас ничего не играет!")
+
+        queue = get_queue(interaction.guild.id)
+        if queue:
+            await vc.stop()
+            await interaction.followup.send("⏭️ Трек пропущен! Следующий в очереди...")
+        else:
+            await vc.stop()
+            await interaction.followup.send("⏭️ Трек пропущен! Очередь пуста.")
+
+        await update_player_message(interaction, vc, queue, interaction)
+    except Exception as e:
+        logger.error(f"Ошибка в skip: {e}")
+        await interaction.followup.send(f"❌ Произошла ошибка: {e}")
 
 
 @bot.tree.command(name="stop", description="Остановить музыку и очистить очередь")
 async def stop(interaction: discord.Interaction):
     await interaction.response.defer()
-    vc: wavelink.Player = interaction.guild.voice_client
-    if not vc:
-        return await interaction.followup.send("❌ Бот не в голосовом канале!")
-    if not vc.current:
-        return await interaction.followup.send("❌ Сейчас ничего не играет!")
-    queue = get_queue(interaction.guild.id)
-    queue.clear()
-    await vc.stop()
-    await interaction.followup.send("⏹️ Музыка остановлена! Очередь очищена!")
-    await update_player_message(interaction, vc, queue, interaction)
+
+    try:
+        vc, error = await get_or_create_player(interaction)
+        if error:
+            return await interaction.followup.send(error)
+
+        if not vc.current:
+            return await interaction.followup.send("❌ Сейчас ничего не играет!")
+
+        queue = get_queue(interaction.guild.id)
+        queue.clear()
+        await vc.stop()
+        await interaction.followup.send("⏹️ Музыка остановлена! Очередь очищена!")
+        await update_player_message(interaction, vc, queue, interaction)
+    except Exception as e:
+        logger.error(f"Ошибка в stop: {e}")
+        await interaction.followup.send(f"❌ Произошла ошибка: {e}")
 
 
 @bot.tree.command(name="clear", description="Очистить очередь без остановки текущей песни")
 async def clear(interaction: discord.Interaction):
     await interaction.response.defer()
-    vc: wavelink.Player = interaction.guild.voice_client
-    if not vc:
-        return await interaction.followup.send("❌ Бот не в голосовом канале!")
-    queue = get_queue(interaction.guild.id)
-    count = len(queue)
-    if count == 0:
-        return await interaction.followup.send("📭 Очередь уже пуста!")
-    queue.clear()
-    await interaction.followup.send(f"🗑️ Очищено {count} треков из очереди!")
-    await update_player_message(interaction, vc, queue, interaction)
+
+    try:
+        vc, error = await get_or_create_player(interaction)
+        if error:
+            return await interaction.followup.send(error)
+
+        queue = get_queue(interaction.guild.id)
+        count = len(queue)
+        if count == 0:
+            return await interaction.followup.send("📭 Очередь уже пуста!")
+
+        queue.clear()
+        await interaction.followup.send(f"🗑️ Очищено {count} треков из очереди!")
+        await update_player_message(interaction, vc, queue, interaction)
+    except Exception as e:
+        logger.error(f"Ошибка в clear: {e}")
+        await interaction.followup.send(f"❌ Произошла ошибка: {e}")
 
 
 @bot.tree.command(name="pause", description="Поставить на паузу")
 async def pause(interaction: discord.Interaction):
-    vc: wavelink.Player = interaction.guild.voice_client
-    if not vc or not vc.current:
-        return await interaction.response.send_message("❌ Сейчас ничего не играет!")
-    if vc.paused:
-        return await interaction.response.send_message("⏸️ Уже на паузе!")
-    await vc.pause(True)
-    await interaction.response.send_message("⏸️ На паузе!")
-    queue = get_queue(interaction.guild.id)
-    await update_player_message(interaction, vc, queue, interaction)
+    try:
+        vc, error = await get_or_create_player(interaction)
+        if error:
+            return await interaction.response.send_message(error)
+
+        if not vc.current:
+            return await interaction.response.send_message("❌ Сейчас ничего не играет!")
+
+        if vc.paused:
+            return await interaction.response.send_message("⏸️ Уже на паузе!")
+
+        await vc.pause(True)
+        await interaction.response.send_message("⏸️ На паузе!")
+        queue = get_queue(interaction.guild.id)
+        await update_player_message(interaction, vc, queue, interaction)
+    except Exception as e:
+        logger.error(f"Ошибка в pause: {e}")
+        await interaction.response.send_message(f"❌ Произошла ошибка: {e}")
 
 
 @bot.tree.command(name="resume", description="Продолжить воспроизведение")
 async def resume(interaction: discord.Interaction):
-    vc: wavelink.Player = interaction.guild.voice_client
-    if not vc or not vc.current:
-        return await interaction.response.send_message("❌ Сейчас ничего не играет!")
-    if not vc.paused:
-        return await interaction.response.send_message("▶️ Уже играет!")
-    await vc.pause(False)
-    await interaction.response.send_message("▶️ Продолжаю!")
-    queue = get_queue(interaction.guild.id)
-    await update_player_message(interaction, vc, queue, interaction)
+    try:
+        vc, error = await get_or_create_player(interaction)
+        if error:
+            return await interaction.response.send_message(error)
+
+        if not vc.current:
+            return await interaction.response.send_message("❌ Сейчас ничего не играет!")
+
+        if not vc.paused:
+            return await interaction.response.send_message("▶️ Уже играет!")
+
+        await vc.pause(False)
+        await interaction.response.send_message("▶️ Продолжаю!")
+        queue = get_queue(interaction.guild.id)
+        await update_player_message(interaction, vc, queue, interaction)
+    except Exception as e:
+        logger.error(f"Ошибка в resume: {e}")
+        await interaction.response.send_message(f"❌ Произошла ошибка: {e}")
 
 
 @bot.tree.command(name="leave", description="Отключить бота и очистить очередь")
 async def leave(interaction: discord.Interaction):
     await interaction.response.defer()
-    vc: wavelink.Player = interaction.guild.voice_client
-    if not vc:
-        return await interaction.followup.send("❌ Бот не в голосовом канале!")
-    queue = get_queue(interaction.guild.id)
-    queue.clear()
-    await vc.disconnect()
-    await interaction.followup.send("👋 Бот отключён! Очередь очищена!")
+
+    try:
+        vc: wavelink.Player = interaction.guild.voice_client
+        if not vc:
+            return await interaction.followup.send("❌ Бот не в голосовом канале!")
+
+        queue = get_queue(interaction.guild.id)
+        queue.clear()
+        await vc.disconnect()
+        await interaction.followup.send("👋 Бот отключён! Очередь очищена!")
+    except Exception as e:
+        logger.error(f"Ошибка в leave: {e}")
+        await interaction.followup.send(f"❌ Произошла ошибка: {e}")
 
 
 # ========== СОБЫТИЯ WAVELINK ==========
@@ -578,12 +704,18 @@ async def run_web_server():
 
 async def main():
     asyncio.create_task(run_web_server())
-    token = os.getenv("DISCORD_TOKEN")
-    if not token:
-        logger.error("❌ DISCORD_TOKEN не установлен!")
-        return
-    await bot.start(token)
+    #    token = os.getenv("DISCORD_TOKEN")
+    #    if not token:
+    #        logger.error("❌ DISCORD_TOKEN не установлен!")
+    #      return
+    await bot.start("-")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Бот остановлен пользователем")
+    except Exception as e:
+        logger.error(f"Критическая ошибка: {e}")
+        sys.exit(1)
